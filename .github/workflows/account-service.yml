@@ -39,8 +39,8 @@ jobs:
         uses: snyk/actions/node@master
         with:
           command: test
-          # path is relative to the working-directory set above
-          args: --file=package.json --severity-threshold=high
+          # uses: actions run at workspace root, NOT in defaults.run.working-directory
+          args: --file=services/account-service/package.json --severity-threshold=high
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
