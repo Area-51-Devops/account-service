@@ -4,9 +4,11 @@ on:
   push:
     paths:
       - 'services/account-service/**'
+      - 'services/shared/**'
   pull_request:
     paths:
       - 'services/account-service/**'
+      - 'services/shared/**'
   workflow_dispatch:
     
 
@@ -37,12 +39,25 @@ jobs:
         uses: snyk/actions/node@master
         with:
           command: test
-          args: --file=services/account-service/package.json --severity-threshold=high
+          # path is relative to the working-directory set above
+          args: --file=package.json --severity-threshold=high
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
       - name: Build (optional)
         run: npm run build || echo "No build step"
+
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Docker Login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build Docker Image
         working-directory: services
@@ -55,12 +70,6 @@ jobs:
           format: table
           exit-code: 0
           severity: HIGH,CRITICAL
-
-      - name: Docker Login
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Push Image
         run: docker push ${{ secrets.DOCKER_USERNAME }}/account-service:latest
