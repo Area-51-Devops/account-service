@@ -65,6 +65,7 @@ app.get('/health/liveness', async (req, res, next) => {
     await pool.execute('SELECT 1');
     res.json({ status: 'UP', service: 'account-service' });
   } catch (err) {
+    logger.error(err, 'Liveness check failed');
     next(createError(503, 'HEALTH_CHECK_FAILED', 'Liveness check failed'));
   }
 });
@@ -75,6 +76,7 @@ app.get('/health/readiness', async (req, res, next) => {
     await pool.execute('SELECT 1');
     res.json({ status: 'READY', service: 'account-service' });
   } catch (err) {
+    logger.error(err, 'Readiness check failed');
     next(createError(503, 'NOT_READY', 'Service not ready'));
   }
 });
@@ -167,7 +169,7 @@ app.post('/accounts/:id/debit', async (req, res, next) => {
     }
 
     const account = rows[0];
-    if (parseFloat(account.balance) < parseFloat(amount)) {
+    if (Number.parseFloat(account.balance) < Number.parseFloat(amount)) {
       await conn.rollback();
       return next(createError(400, 'INSUFFICIENT_FUNDS', 'Insufficient balance'));
     }
@@ -179,7 +181,7 @@ app.post('/accounts/:id/debit', async (req, res, next) => {
     await conn.commit();
 
     log.info({ accountId, amount }, 'Debit successful');
-    res.json({ success: true, newBalance: (parseFloat(account.balance) - parseFloat(amount)).toFixed(2) });
+    res.json({ success: true, newBalance: (Number.parseFloat(account.balance) - Number.parseFloat(amount)).toFixed(2) });
   } catch (err) {
     await conn.rollback();
     next(err);
@@ -214,7 +216,7 @@ app.post('/accounts/:id/credit', async (req, res, next) => {
       'UPDATE accounts SET balance = balance + ? WHERE id = ?',
       [amount, accountId]
     );
-    const newBalance = (parseFloat(rows[0].balance) + parseFloat(amount)).toFixed(2);
+    const newBalance = (Number.parseFloat(rows[0].balance) + Number.parseFloat(amount)).toFixed(2);
     await conn.commit();
 
     log.info({ accountId, amount }, 'Credit successful');
@@ -249,7 +251,7 @@ app.post('/accounts/:id/topup', async (req, res, next) => {
     await conn.execute(
       'UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, accountId]
     );
-    const newBalance = (parseFloat(rows[0].balance) + parseFloat(amount)).toFixed(2);
+    const newBalance = (Number.parseFloat(rows[0].balance) + Number.parseFloat(amount)).toFixed(2);
     await conn.commit();
 
     log.info({ accountId, amount }, 'Top-up successful');
