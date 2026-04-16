@@ -35,6 +35,27 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v6
+        with:
+          projectBaseDir: ${{ inputs.working_directory }}
+          args: >
+            -Dsonar.projectKey=${{ inputs.sonar_project_key }}
+            -Dsonar.projectName=${{ inputs.sonar_project_key }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: SonarQube Quality Gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        continue-on-error: true
+        with:
+          scanMetadataReportFile: ${{ inputs.working_directory }}/.scannerwork/report-task.txt
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
       - name: Snyk Scan
         uses: snyk/actions/node@master
         with:
