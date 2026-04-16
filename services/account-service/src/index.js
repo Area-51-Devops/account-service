@@ -51,6 +51,7 @@ async function init() {
 // Express App
 // ──────────────────────────────────────────────
 const app = express();
+app.disable('x-powered-by');
 app.use(cors());
 app.use(express.json());
 app.use(requestIdMiddleware);
@@ -270,7 +271,11 @@ app.use(errorMiddleware);
 // ── Boot ───────────────────────────────────────
 app.listen(PORT, () => logger.info({ port: PORT }, 'account-service listening'));
 
-init().catch(err => {
-  logger.fatal({ err }, 'account-service failed to initialise');
-  process.exit(1);
-});
+(async () => {
+  try {
+    await init();
+  } catch (err) {
+    logger.fatal({ err }, 'account-service failed to initialise');
+    process.exit(1);
+  }
+})();
