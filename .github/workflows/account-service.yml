@@ -10,11 +10,17 @@ on:
       - 'services/account-service/**'
       - 'services/shared/**'
   workflow_dispatch:
-    
 
 jobs:
   build:
+    name: "CI - account-service"
     runs-on: ubuntu-latest
+
+    # Required so github.token can pull @area-51-devops/shared from GitHub Packages
+    # contents: write is required for the auto-sync lockfile step to push commits
+    permissions:
+      contents: write
+      packages: read
 
     defaults:
       run:
@@ -23,23 +29,89 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Required by github-tag-action to read full git history
 
-
-      - name: Cache node_modules
+      - name: Cache npm
         uses: actions/cache@v4
         with:
-          path: services/account-service/node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('services/account-service/package-lock.json') }}
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('services/account-service/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
 
+      # -------- TAGGING STRATEGY ----------------------------------------
+      # main branch  → semantic version (vX.Y.Z)  — pushed to registry
+      # other branch → sha-XXXXXXX                — built & scanned ONLY, NOT pushed
+      # ------------------------------------------------------------------
 
+      - name: Calculate Semantic Version (main only)
+        id: semver
+        if: github.ref == 'refs/heads/main'
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          dry_run: true
+          default_bump: patch
+          tag_prefix: 'v'
+
+      - name: Resolve Image Tag
+        id: image_tag
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
+            echo "push=true"                               >> $GITHUB_OUTPUT
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            echo "tag=sha-${SHORT_SHA}"                    >> $GITHUB_OUTPUT
+            echo "push=false"                              >> $GITHUB_OUTPUT
+          fi
+
+      # -------- SETUP NODE & REGISTRY -----------------------------------
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@area-51-devops'
+
+      # -------- INSTALL -------------------------------------------------
+      # PREREQUISITE: @area-51-devops/shared package visibility must be set to
+      # "Internal" in GitHub Packages settings so that github.token from any
+      # repo in the org can read it without a PAT.
+      # Org → Packages → shared → Package settings → Change visibility → Internal
       - name: Install dependencies
-        run: npm install
+        run: npm ci || npm install
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
 
+      - name: Auto-fix package-lock.json
+        # Only run on push branches, not PRs
+        if: github.event_name == 'push'
+        run: |
+          if [ -n "$(git status --porcelain package-lock.json)" ]; then
+            echo "Lockfile was updated by npm install. Committing to repository..."
+            git config --global user.name "github-actions[bot]"
+            git config --global user.email "github-actions[bot]@users.noreply.github.com"
+            git add package-lock.json
+            git commit -m "chore: auto-sync package-lock.json [skip ci]"
+            git push
+          else
+            echo "Lockfile is fully synced."
+          fi
 
+      # -------- TEST ----------------------------------------------------
+      - name: Run Tests
+        run: npm test
+
+      # -------- SONAR ---------------------------------------------------
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v6
         with:
-          projectBaseDir: .
+          projectBaseDir: services/account-service
+          args: >
+            -Dsonar.projectKey=NexusBank
+            -Dsonar.projectName=NexusBank
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -47,23 +119,23 @@ jobs:
       - name: SonarQube Quality Gate
         uses: SonarSource/sonarqube-quality-gate-action@v1
         with:
-          scanMetadataReportFile: ./.scannerwork/report-task.txt
+          scanMetadataReportFile: services/account-service/.scannerwork/report-task.txt
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        # NOTE: continue-on-error removed — a failing gate now blocks the pipeline
 
+      # -------- SNYK ----------------------------------------------------
       - name: Snyk Scan
-        uses: snyk/actions/node@master
+        uses: snyk/actions/node@0.4.0
         with:
           command: test
-          # uses: actions run at workspace root, NOT in defaults.run.working-directory
           args: --file=services/account-service/package.json --severity-threshold=high
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        # NOTE: no continue-on-error — HIGH/CRITICAL vulns now fail the pipeline
 
-      - name: Build (optional)
-        run: npm run build || echo "No build step"
-
+      # -------- DOCKER BUILD --------------------------------------------
       - name: Docker Login
         uses: docker/login-action@v3
         with:
@@ -72,15 +144,86 @@ jobs:
 
       - name: Build Docker Image
         working-directory: services
-        run: docker build -f account-service/Dockerfile -t ${{ secrets.DOCKER_USERNAME }}/account-service:latest .
+        run: |
+          echo "${{ github.token }}" > npm_token.txt
+          docker build \
+            -f account-service/Dockerfile \
+            --secret id=npm_token,src=npm_token.txt \
+            -t ${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }} \
+            .
+          rm -f npm_token.txt
 
-      - name: Trivy Scan
+      # -------- TRIVY (runs BEFORE push — a failure blocks the push) -----
+      - name: Trivy Security Scan
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ${{ secrets.DOCKER_USERNAME }}/account-service:latest
+          image-ref: '${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }}'
           format: table
-          exit-code: 1
-          severity: CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
 
-      - name: Push Image
-        run: docker push ${{ secrets.DOCKER_USERNAME }}/account-service:latest
+      # -------- PUSH (main only, after Trivy passes) --------------------
+      - name: Push Docker Image (semver + latest)
+        if: steps.image_tag.outputs.push == 'true'
+        run: |
+          docker push ${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }}
+          docker tag  ${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }} \
+                      ${{ secrets.DOCKER_USERNAME }}/account-service:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/account-service:latest
+
+      - name: Create Git Tag (main only)
+        if: steps.image_tag.outputs.push == 'true'
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ github.token }}
+          custom_tag: ${{ steps.semver.outputs.new_tag }}
+          tag_prefix: ''
+
+      # -------- EMAIL NOTIFICATION --------------------------------------
+      - name: Send Email (Success)
+        if: success() && github.ref == 'refs/heads/main'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Success - account-service ${{ steps.image_tag.outputs.tag }}"
+          body: |
+            Build Successful
+
+            Service:      account-service
+            Tag:          ${{ steps.image_tag.outputs.tag }}
+            Image:        ${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }}
+            Repository:   ${{ github.repository }}
+            Workflow:     ${{ github.workflow }}
+            Triggered By: ${{ github.actor }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
+
+      - name: Send Email (Failure)
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "CI Failed - account-service - Run #${{ github.run_number }}"
+          body: |
+            CI Pipeline Execution Failed
+
+            Service:       account-service
+            Tag Attempted: ${{ steps.image_tag.outputs.tag }}
+            Repository:    ${{ github.repository }}
+            Workflow:      ${{ github.workflow }}
+
+            Event Type:    ${{ github.event_name }}
+            Branch:        ${{ github.ref_name }}
+            Triggered By:  ${{ github.actor }}
+
+            Logs:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          to: ${{ secrets.EMAIL_TO }}
+          from: GitHub Actions
