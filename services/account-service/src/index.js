@@ -151,10 +151,10 @@ app.post('/accounts/:id/debit', async (req, res, next) => {
   const log = logger.child({ requestId: req.requestId, endpoint: 'debit' });
   const conn = await pool.getConnection();
   try {
-    const { amount, compensationKey } = req.body;
+    const { amount } = req.body;
     const accountId = req.params.id;
 
-    if (!amount || isNaN(amount) || Number(amount) <= 0) {
+    if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
       return next(createError(400, 'VALIDATION_ERROR', 'Valid positive amount required'));
     }
 
@@ -198,7 +198,7 @@ app.post('/accounts/:id/credit', async (req, res, next) => {
     const { amount } = req.body;
     const accountId = req.params.id;
 
-    if (!amount || isNaN(amount) || Number(amount) <= 0) {
+    if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
       return next(createError(400, 'VALIDATION_ERROR', 'Valid positive amount required'));
     }
 
@@ -236,7 +236,7 @@ app.post('/accounts/:id/topup', async (req, res, next) => {
   try {
     const { amount } = req.body;
     const accountId = req.params.id;
-    if (!amount || isNaN(amount) || Number(amount) <= 0) {
+    if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
       return next(createError(400, 'VALIDATION_ERROR', 'Valid positive amount required'));
     }
 
