@@ -108,10 +108,7 @@ jobs:
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v6
         with:
-          projectBaseDir: services/account-service
-          args: >
-            -Dsonar.projectKey=NexusBank
-            -Dsonar.projectName=NexusBank
+          projectBaseDir: .
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
