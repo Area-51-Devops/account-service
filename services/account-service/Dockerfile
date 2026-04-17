@@ -5,6 +5,8 @@ WORKDIR /usr/src/app
 RUN apk update && apk upgrade --no-cache
 # Context is ./services, so copy paths must be relative to the services/ directory.12
 COPY account-service/package*.json ./
+
+
 RUN (npm ci --omit=dev || npm install --omit=dev) && \
   npm cache clean --force && \
   rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
