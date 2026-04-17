@@ -147,9 +147,9 @@ app.get('/accounts/:id', async (req, res, next) => {
   }
 });
 
-// ── Debit Account (row-level lock) ─────────────
-app.post('/accounts/:id/debit', async (req, res, next) => {
-  const log = logger.child({ requestId: req.requestId, endpoint: 'debit' });
+// ── Transaction Helper to Prevent Code Duplication ──
+async function processTransaction(req, res, next, config) {
+  const log = logger.child({ requestId: req.requestId, endpoint: config.name });
   const conn = await pool.getConnection();
   try {
     const { amount } = req.body;
@@ -160,67 +160,35 @@ app.post('/accounts/:id/debit', async (req, res, next) => {
     }
 
     await conn.beginTransaction();
-    const [rows] = await conn.execute(
-      'SELECT * FROM accounts WHERE id = ? AND is_frozen = 0 FOR UPDATE',
-      [accountId]
-    );
+
+    const query = config.checkFrozen
+      ? 'SELECT * FROM accounts WHERE id = ? AND is_frozen = 0 FOR UPDATE'
+      : 'SELECT * FROM accounts WHERE id = ? FOR UPDATE';
+    
+    const [rows] = await conn.execute(query, [accountId]);
+    
     if (rows.length === 0) {
       await conn.rollback();
-      return next(createError(404, 'ACCOUNT_NOT_FOUND', 'Account not found or is frozen'));
+      return next(createError(404, 'ACCOUNT_NOT_FOUND', config.checkFrozen ? 'Account not found or is frozen' : 'Account not found'));
     }
 
     const account = rows[0];
-    if (Number.parseFloat(account.balance) < Number.parseFloat(amount)) {
-      await conn.rollback();
-      return next(createError(400, 'INSUFFICIENT_FUNDS', 'Insufficient balance'));
+    let newBalance;
+
+    if (config.type === 'DEBIT') {
+      if (Number.parseFloat(account.balance) < Number.parseFloat(amount)) {
+        await conn.rollback();
+        return next(createError(400, 'INSUFFICIENT_FUNDS', 'Insufficient balance'));
+      }
+      await conn.execute('UPDATE accounts SET balance = balance - ? WHERE id = ?', [amount, accountId]);
+      newBalance = (Number.parseFloat(account.balance) - Number.parseFloat(amount)).toFixed(2);
+    } else { // CREDIT or TOPUP
+      await conn.execute('UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, accountId]);
+      newBalance = (Number.parseFloat(account.balance) + Number.parseFloat(amount)).toFixed(2);
     }
 
-    await conn.execute(
-      'UPDATE accounts SET balance = balance - ? WHERE id = ?',
-      [amount, accountId]
-    );
     await conn.commit();
-
-    log.info({ accountId, amount }, 'Debit successful');
-    res.json({ success: true, newBalance: (Number.parseFloat(account.balance) - Number.parseFloat(amount)).toFixed(2) });
-  } catch (err) {
-    await conn.rollback();
-    next(err);
-  } finally {
-    conn.release();
-  }
-});
-
-// ── Credit Account (row-level lock) ────────────
-app.post('/accounts/:id/credit', async (req, res, next) => {
-  const log = logger.child({ requestId: req.requestId, endpoint: 'credit' });
-  const conn = await pool.getConnection();
-  try {
-    const { amount } = req.body;
-    const accountId = req.params.id;
-
-    if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
-      return next(createError(400, 'VALIDATION_ERROR', 'Valid positive amount required'));
-    }
-
-    await conn.beginTransaction();
-    const [rows] = await conn.execute(
-      'SELECT * FROM accounts WHERE id = ? AND is_frozen = 0 FOR UPDATE',
-      [accountId]
-    );
-    if (rows.length === 0) {
-      await conn.rollback();
-      return next(createError(404, 'ACCOUNT_NOT_FOUND', 'Account not found or is frozen'));
-    }
-
-    await conn.execute(
-      'UPDATE accounts SET balance = balance + ? WHERE id = ?',
-      [amount, accountId]
-    );
-    const newBalance = (Number.parseFloat(rows[0].balance) + Number.parseFloat(amount)).toFixed(2);
-    await conn.commit();
-
-    log.info({ accountId, amount }, 'Credit successful');
+    log.info({ accountId, amount }, config.successMessage);
     res.json({ success: true, newBalance });
   } catch (err) {
     await conn.rollback();
@@ -228,42 +196,20 @@ app.post('/accounts/:id/credit', async (req, res, next) => {
   } finally {
     conn.release();
   }
-});
+}
 
-// ── Top Up (deposit) ───────────────────────────
-app.post('/accounts/:id/topup', async (req, res, next) => {
-  const log = logger.child({ requestId: req.requestId, endpoint: 'topup' });
-  const conn = await pool.getConnection();
-  try {
-    const { amount } = req.body;
-    const accountId = req.params.id;
-    if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
-      return next(createError(400, 'VALIDATION_ERROR', 'Valid positive amount required'));
-    }
+// ── Transactions (row-level lock) ──────────────
+app.post('/accounts/:id/debit', (req, res, next) => 
+  processTransaction(req, res, next, { name: 'debit', type: 'DEBIT', checkFrozen: true, successMessage: 'Debit successful' })
+);
 
-    await conn.beginTransaction();
-    const [rows] = await conn.execute(
-      'SELECT * FROM accounts WHERE id = ? FOR UPDATE', [accountId]
-    );
-    if (rows.length === 0) {
-      await conn.rollback();
-      return next(createError(404, 'ACCOUNT_NOT_FOUND', 'Account not found'));
-    }
-    await conn.execute(
-      'UPDATE accounts SET balance = balance + ? WHERE id = ?', [amount, accountId]
-    );
-    const newBalance = (Number.parseFloat(rows[0].balance) + Number.parseFloat(amount)).toFixed(2);
-    await conn.commit();
+app.post('/accounts/:id/credit', (req, res, next) => 
+  processTransaction(req, res, next, { name: 'credit', type: 'CREDIT', checkFrozen: true, successMessage: 'Credit successful' })
+);
 
-    log.info({ accountId, amount }, 'Top-up successful');
-    res.json({ success: true, newBalance });
-  } catch (err) {
-    await conn.rollback();
-    next(err);
-  } finally {
-    conn.release();
-  }
-});
+app.post('/accounts/:id/topup', (req, res, next) => 
+  processTransaction(req, res, next, { name: 'topup', type: 'CREDIT', checkFrozen: false, successMessage: 'Top-up successful' })
+);
 
 // ── Global Error Handler ───────────────────────
 app.use(errorMiddleware);
@@ -271,11 +217,7 @@ app.use(errorMiddleware);
 // ── Boot ───────────────────────────────────────
 app.listen(PORT, () => logger.info({ port: PORT }, 'account-service listening'));
 
-(async () => {
-  try {
-    await init();
-  } catch (err) {
-    logger.fatal({ err }, 'account-service failed to initialise');
-    process.exit(1);
-  }
-})();
+init().catch((err) => {
+  logger.fatal({ err }, 'account-service failed to initialise');
+  process.exit(1);
+});
