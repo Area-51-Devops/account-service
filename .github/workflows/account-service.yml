@@ -152,6 +152,17 @@ jobs:
           ignore-unfixed: true
           severity: HIGH,CRITICAL
 
+  prod-gate:
+    needs: [build]
+    if: |
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: gate
+    steps:
+      - name: Waiting for approval
+        run: echo "Approval required before building & pushing image"
+
       # -------- PUSH (main only, after Trivy passes) --------------------
       - name: Push Docker Image (semver + latest)
         if: steps.image_tag.outputs.push == 'true'
