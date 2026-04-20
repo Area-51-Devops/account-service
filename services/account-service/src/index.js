@@ -58,17 +58,15 @@ app.use(requestIdMiddleware);
 
 // ── Health Probes ──────────────────────────────
 app.get('/health/startup', (req, res) => {
-  res.json({ status: isStarted ? 'UP' : 'STARTING', service: 'account-service' });
+  const statusPayload = { status: isStarted ? 'UP' : 'STARTING', service: 'account-service' };
+  if (!isStarted) {
+    return res.status(503).json(statusPayload);
+  }
+  res.json(statusPayload);
 });
 
-app.get('/health/liveness', async (req, res, next) => {
-  try {
-    await pool.execute('SELECT 1');
-    res.json({ status: 'UP', service: 'account-service' });
-  } catch (err) {
-    logger.error(err, 'Liveness check failed');
-    next(createError(503, 'HEALTH_CHECK_FAILED', 'Liveness check failed'));
-  }
+app.get('/health/liveness', (req, res) => {
+  res.json({ status: 'UP', service: 'account-service' });
 });
 
 app.get('/health/readiness', async (req, res, next) => {
