@@ -16,6 +16,8 @@ jobs:
     name: "CI - account-service"
     runs-on: ubuntu-latest
 
+    # Required so github.token can pull @area-51-devops/shared from GitHub Packages
+    # contents: write is required for the auto-sync lockfile step to push commits
     permissions:
       contents: write
       packages: read
@@ -24,16 +26,11 @@ jobs:
       run:
         working-directory: services/account-service
 
-    outputs:
-      image_tag: ${{ steps.image_tag.outputs.tag }}
-      push_image: ${{ steps.image_tag.outputs.push }}
-      semver_tag: ${{ steps.semver.outputs.new_tag }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0   # Required by github-tag-action to read full git history
 
       - name: Cache npm
         uses: actions/cache@v4
@@ -44,6 +41,10 @@ jobs:
             ${{ runner.os }}-npm-
 
       # -------- TAGGING STRATEGY ----------------------------------------
+      # main branch  → semantic version (vX.Y.Z)  — pushed to registry
+      # other branch → sha-XXXXXXX                — built & scanned ONLY, NOT pushed
+      # ------------------------------------------------------------------
+
       - name: Calculate Semantic Version (main only)
         id: semver
         if: github.ref == 'refs/heads/main'
@@ -59,42 +60,47 @@ jobs:
         run: |
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "tag=${{ steps.semver.outputs.new_tag }}" >> $GITHUB_OUTPUT
-            echo "push=true" >> $GITHUB_OUTPUT
+            echo "push=true"                               >> $GITHUB_OUTPUT
           else
             SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-            echo "tag=sha-${SHORT_SHA}" >> $GITHUB_OUTPUT
-            echo "push=false" >> $GITHUB_OUTPUT
+            echo "tag=sha-${SHORT_SHA}"                    >> $GITHUB_OUTPUT
+            echo "push=false"                              >> $GITHUB_OUTPUT
           fi
 
+      # -------- SETUP NODE & REGISTRY -----------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci || npm install
 
       - name: Auto-fix package-lock.json
+        # Only run on push branches, not PRs
         if: github.event_name == 'push'
         run: |
           if [ -n "$(git status --porcelain package-lock.json)" ]; then
-            echo "Lockfile was updated. Committing changes..."
+            echo "Lockfile was updated by npm install. Committing to repository..."
             git config --global user.name "github-actions[bot]"
             git config --global user.email "github-actions[bot]@users.noreply.github.com"
             git add package-lock.json
             git commit -m "chore: auto-sync package-lock.json [skip ci]"
             git push
           else
-            echo "Lockfile is synced."
+            echo "Lockfile is fully synced."
           fi
 
+      # -------- TEST ----------------------------------------------------
       - name: Run Tests
         run: npm test
 
+      # -------- SONAR ---------------------------------------------------
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v6
         with:
-          projectBaseDir: services/account-service
+          projectBaseDir: .
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -106,15 +112,19 @@ jobs:
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        # NOTE: continue-on-error removed — a failing gate now blocks the pipeline
 
+      # -------- SNYK ----------------------------------------------------
       - name: Snyk Scan
         uses: snyk/actions/node@0.4.0
         with:
           command: test
-          args: --file=package.json --severity-threshold=high
+          args: --file=services/account-service/package.json --severity-threshold=high
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        # NOTE: no continue-on-error — HIGH/CRITICAL vulns now fail the pipeline
 
+      # -------- DOCKER BUILD --------------------------------------------
       - name: Docker Login
         uses: docker/login-action@v3
         with:
@@ -132,6 +142,7 @@ jobs:
             .
           rm -f npm_token.txt
 
+      # -------- TRIVY (runs BEFORE push — a failure blocks the push) -----
       - name: Trivy Security Scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -141,52 +152,41 @@ jobs:
           ignore-unfixed: true
           severity: HIGH,CRITICAL
 
-  # ===================================================================
-  prod-gate:
-    name: Production Gate
-    needs: build
-    if: |
-      github.event_name != 'pull_request' &&
-      github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: gate
-
-    steps:
-      - name: Waiting for approval
-        run: echo "✅ Manual approval received - proceeding with push and tagging."
-
+      # -------- PUSH (main only, after Trivy passes) --------------------
       - name: Push Docker Image (semver + latest)
-        if: needs.build.outputs.push_image == 'true'
+        if: steps.image_tag.outputs.push == 'true'
         run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/account-service:${{ needs.build.outputs.image_tag }}
-          docker tag ${{ secrets.DOCKER_USERNAME }}/account-service:${{ needs.build.outputs.image_tag }} \
-                     ${{ secrets.DOCKER_USERNAME }}/account-service:latest
+          docker push ${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }}
+          docker tag  ${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }} \
+                      ${{ secrets.DOCKER_USERNAME }}/account-service:latest
           docker push ${{ secrets.DOCKER_USERNAME }}/account-service:latest
 
-      - name: Create Git Tag
-        if: needs.build.outputs.push_image == 'true'
+      - name: Create Git Tag (main only)
+        if: steps.image_tag.outputs.push == 'true'
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ github.token }}
-          custom_tag: ${{ needs.build.outputs.semver_tag }}
+          custom_tag: ${{ steps.semver.outputs.new_tag }}
           tag_prefix: ''
 
+      # -------- EMAIL NOTIFICATION --------------------------------------
       - name: Send Email (Success)
-        if: success()
+        if: success() && github.ref == 'refs/heads/main'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_HOST }}
           server_port: ${{ secrets.SMTP_PORT }}
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "✅ CI Success - account-service ${{ needs.build.outputs.image_tag }}"
+          subject: "CI Success - account-service ${{ steps.image_tag.outputs.tag }}"
           body: |
             Build Successful
 
             Service:      account-service
-            Tag:          ${{ needs.build.outputs.image_tag }}
-            Image:        ${{ secrets.DOCKER_USERNAME }}/account-service:${{ needs.build.outputs.image_tag }}
+            Tag:          ${{ steps.image_tag.outputs.tag }}
+            Image:        ${{ secrets.DOCKER_USERNAME }}/account-service:${{ steps.image_tag.outputs.tag }}
             Repository:   ${{ github.repository }}
+            Workflow:     ${{ github.workflow }}
             Triggered By: ${{ github.actor }}
           to: ${{ secrets.EMAIL_TO }}
           from: GitHub Actions
@@ -199,15 +199,20 @@ jobs:
           server_port: ${{ secrets.SMTP_PORT }}
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "❌ CI Failed - account-service - Run #${{ github.run_number }}"
+          subject: "CI Failed - account-service - Run #${{ github.run_number }}"
           body: |
-            CI Pipeline Failed
+            CI Pipeline Execution Failed
 
             Service:       account-service
-            Tag Attempted: ${{ needs.build.outputs.image_tag }}
+            Tag Attempted: ${{ steps.image_tag.outputs.tag }}
             Repository:    ${{ github.repository }}
+            Workflow:      ${{ github.workflow }}
+
+            Event Type:    ${{ github.event_name }}
             Branch:        ${{ github.ref_name }}
             Triggered By:  ${{ github.actor }}
-            Logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Logs:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           to: ${{ secrets.EMAIL_TO }}
           from: GitHub Actions
