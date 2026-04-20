@@ -171,17 +171,17 @@ jobs:
   # Nothing is pushed to Docker Hub until one of them clicks Approve.
   # --------------------------------------------------------------------
   prod-approval-gate:
-    needs: [build]
-    if: |
-      always() &&
-      github.event_name != 'pull_request' &&
-      github.ref == 'refs/heads/main' &&
-      needs.build.result == 'success'
-    runs-on: ubuntu-latest
-    environment: production
-    steps:
-      - name: Approved — proceeding to push image
-        run: echo "Production deployment approved for tag ${{ needs.build.outputs.image_tag }}"
+   needs: [build]
+   if: |
+     always() &&
+     github.event_name != 'pull_request' &&
+     github.ref == 'refs/heads/main' &&
+     needs.build.result == 'success'
+   runs-on: ubuntu-latest
+   environment: gate   
+   steps:
+     - name: Waiting for approval
+       run: echo "Awaiting approval before push"
 
   # -------- PUSH (only after gokulk18 or Harshithaaa03 approves) -------
   push:
