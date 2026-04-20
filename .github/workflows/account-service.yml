@@ -191,6 +191,41 @@ jobs:
           custom_tag: ${{ needs.build.outputs.semver_tag }}
           tag_prefix: ''
 
+  create-release:
+    name: "Create GitHub Release"
+    needs: [build, prod-gate]
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      needs.build.result == 'success'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.image_tag }}
+          name: Release ${{ needs.build.outputs.image_tag }}
+          body: |
+            Release of account-service
+            Version: ${{ needs.build.outputs.image_tag }}
+            Image: ${{ secrets.DOCKER_USERNAME }}/account-service:${{ needs.build.outputs.image_tag }}
+          generate_release_notes: true
+
+  # ── JOB 9: NOTIFY ───────────────────────────────────────────────────────────
+  notify:
+    name: "Notify"
+    runs-on: ubuntu-latest
+    needs: [build, prod-gate, create-release]
+    if: always() && github.ref == 'refs/heads/main'
+
+    steps:
       - name: Send Email (Success)
         if: success()
         uses: dawidd6/action-send-mail@v3
